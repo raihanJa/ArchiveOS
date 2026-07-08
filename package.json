@@ -1,0 +1,28 @@
+{
+  "name": "archiveos",
+  "productName": "ArchiveOS",
+  "version": "0.1.0",
+  "description": "Autonomous history simulator — a living archive of a fictional organization.",
+  "main": "dist/main/main.js",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --dev",
+    "test": "vitest run",
+    "smoke": "npm run build && electron . --smoke"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "electron": "^43.1.0",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
