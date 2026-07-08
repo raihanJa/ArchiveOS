@@ -36,6 +36,26 @@ describe("ArchiveDb persistence", () => {
     db.close();
   });
 
+  it("round-trips the full relationship graph", () => {
+    const { db, engine } = seededDb("relgraph.db", 1500);
+    const w2 = db.loadWorld();
+    expect(w2).not.toBeNull();
+    expect(w2!.relationships.size).toBe(engine.world.relationships.size);
+    expect(w2!.memories.size).toBe(engine.world.memories.size);
+    expect(w2!.opinions.size).toBe(engine.world.opinions.size);
+    expect(w2!.secrets.size).toBe(engine.world.secrets.size);
+    expect(w2!.rumors.size).toBe(engine.world.rumors.size);
+    expect(w2!.reputationMarks.size).toBe(engine.world.reputationMarks.size);
+    // A relationship's dimension vector survives the trip intact.
+    for (const [key, rel] of engine.world.relationships) {
+      const r2 = w2!.relationships.get(key);
+      expect(r2).toBeDefined();
+      expect(r2!.dims).toEqual(rel.dims);
+      expect(r2!.status).toBe(rel.status);
+    }
+    db.close();
+  });
+
   it("continues deterministically after reload", () => {
     const { db, engine } = seededDb("continue.db", 300);
     const world2 = db.loadWorld()!;

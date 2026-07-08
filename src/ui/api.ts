@@ -1,7 +1,8 @@
 import type {
   AppSettings, ArchiveStats, Building, Client, Department, Employee,
   EventDetail, EventFilter, InvestigatorAnswer, OrgKind, OrgState, Product,
-  Project, Relationship, SearchResult, SimDocument, SimEvent, Speed,
+  Project, Relationship, RelationshipDetail, RelationshipExplanation,
+  ReputationMark, SearchResult, Secret, SimDocument, SimEvent, Speed,
   Technology, TickPush,
 } from "../shared/types";
 
@@ -13,11 +14,15 @@ export interface OrgInfo {
   stats?: ArchiveStats;
 }
 
+export type RelationshipRow = Relationship & { otherName: string; otherId: number; overall: number };
+
 export interface EmployeeDetail {
   employee: Employee;
   deptName: string | null;
   events: SimEvent[];
-  relationships: (Relationship & { otherName: string; otherId: number })[];
+  relationships: RelationshipRow[];
+  reputation: ReputationMark[];
+  secrets: Secret[];
   documents: Omit<SimDocument, "body">[];
 }
 
@@ -52,6 +57,8 @@ export interface ArchiveApi {
   getEmployee(id: number): Promise<EmployeeDetail | null>;
   listProjects(opts: { text?: string; status?: string; offset?: number; limit?: number }): Promise<{ total: number; rows: Project[] }>;
   getProject(id: number): Promise<ProjectDetail | null>;
+  getRelationship(aId: number, bId: number): Promise<RelationshipDetail | null>;
+  explainRelationship(aId: number, bId: number): Promise<RelationshipExplanation>;
   listDepartments(): Promise<DeptRow[]>;
   getDepartment(id: number): Promise<DeptDetail | null>;
   listProducts(): Promise<Product[]>;

@@ -9,7 +9,8 @@ export type Selection =
   | { kind: "employee"; id: number }
   | { kind: "project"; id: number }
   | { kind: "department"; id: number }
-  | { kind: "document"; id: number };
+  | { kind: "document"; id: number }
+  | { kind: "relationship"; aId: number; bId: number };
 
 export interface NavState {
   view: View;

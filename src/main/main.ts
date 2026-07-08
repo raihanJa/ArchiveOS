@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { ArchiveDb } from "./db";
 import { Investigator } from "./investigator";
+import { RelationshipExplainer } from "./explain";
 import { Engine } from "../sim/engine";
 import type { WorldState } from "../sim/world";
 import {
@@ -25,6 +26,7 @@ const DEV = process.argv.includes("--dev");
 let db: ArchiveDb | null = null;
 let engine: Engine | null = null;
 let investigator: Investigator | null = null;
+let explainer: RelationshipExplainer | null = null;
 let win: BrowserWindow | null = null;
 let speed: Speed = 1;
 let dayAccumulator = 0;
@@ -71,6 +73,7 @@ function openArchive(): void {
     if (savedSpeed !== null && (SPEEDS as readonly number[]).includes(savedSpeed)) speed = savedSpeed;
   }
   investigator = new Investigator(db, () => requireEngine().world.org);
+  explainer = new RelationshipExplainer(db, () => requireEngine().world.org);
 }
 
 function requireDb(): ArchiveDb {
@@ -190,7 +193,9 @@ function registerIpc(): void {
       employee,
       deptName: dept?.name ?? null,
       events: d.eventsForEntity("employee", id, 300),
-      relationships: d.relationshipsFor(id).slice(0, 12),
+      relationships: d.relationshipsFor(id).slice(0, 40),
+      reputation: d.reputationFor(id),
+      secrets: d.secretsFor(id),
       documents: d.listDocuments({ authorId: id, limit: 20 }).rows,
     };
   });
@@ -208,6 +213,12 @@ function registerIpc(): void {
       team,
       events: d.eventsForEntity("project", id, 300),
     };
+  });
+
+  ipcMain.handle("relationship:get", (_e, args: { aId: number; bId: number }) => requireDb().getRelationshipFull(args.aId, args.bId));
+  ipcMain.handle("relationship:explain", async (_e, args: { aId: number; bId: number }) => {
+    if (!explainer) throw new Error("archive not ready");
+    return explainer.explain(args.aId, args.bId, loadSettings());
   });
 
   ipcMain.handle("departments:list", () => {

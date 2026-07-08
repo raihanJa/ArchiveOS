@@ -2,9 +2,12 @@ import { createRequire } from "node:module";
 import type { DatabaseSync as DatabaseSyncT } from "node:sqlite";
 import type {
   ArchiveStats, Building, Client, Department, DocType, Employee, EventDetail,
-  EventFilter, OrgState, Product, Project, Relationship, SearchResult,
-  SimDocument, SimEvent, Technology,
+  EventFilter, Memory, Opinion, OrgState, PersonalMemory, Product, Project,
+  RelDimension, Relationship, RelationshipDetail, RelTimelineEntry,
+  ReputationMark, Rumor, SearchResult, Secret, SimDocument, SimEvent,
+  Technology, Witness,
 } from "../shared/types";
+import { REL_DIMENSIONS, emptyDims, personalityCompatibility, relOverall } from "../shared/types";
 import type { EngineSnapshot, WorldState } from "../sim/world";
 import type { TickOutput } from "../sim/engine";
 
@@ -41,7 +44,8 @@ export class ArchiveDb {
         personality TEXT, traits TEXT, role TEXT, level INTEGER, dept_id INTEGER,
         salary INTEGER, skill INTEGER, stress INTEGER, happiness INTEGER,
         reputation INTEGER, ambitions TEXT, status TEXT, hired_day INTEGER,
-        left_day INTEGER, achievements INTEGER, failures INTEGER
+        left_day INTEGER, achievements INTEGER, failures INTEGER,
+        mood TEXT, mood_day INTEGER
       );
       CREATE TABLE IF NOT EXISTS departments (
         id INTEGER PRIMARY KEY, name TEXT NOT NULL, fn TEXT, head_id INTEGER,
@@ -73,7 +77,45 @@ export class ArchiveDb {
       );
       CREATE TABLE IF NOT EXISTS relationships (
         a_id INTEGER NOT NULL, b_id INTEGER NOT NULL, kind TEXT, strength INTEGER,
-        since_day INTEGER, PRIMARY KEY (a_id, b_id)
+        since_day INTEGER, dims TEXT, status TEXT, last_interaction_day INTEGER,
+        PRIMARY KEY (a_id, b_id)
+      );
+      CREATE TABLE IF NOT EXISTS rel_timeline (
+        id INTEGER PRIMARY KEY, a_id INTEGER NOT NULL, b_id INTEGER NOT NULL,
+        day INTEGER NOT NULL, delta INTEGER, reason TEXT, event_id INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS memories (
+        id INTEGER PRIMARY KEY, a_id INTEGER NOT NULL, b_id INTEGER NOT NULL,
+        category TEXT, day INTEGER, importance INTEGER, emotional_impact INTEGER,
+        event_id INTEGER, text TEXT
+      );
+      CREATE TABLE IF NOT EXISTS opinions (
+        holder_id INTEGER NOT NULL, subject_id INTEGER NOT NULL, sentiment INTEGER,
+        source TEXT, confidence INTEGER, note TEXT, day INTEGER,
+        PRIMARY KEY (holder_id, subject_id)
+      );
+      CREATE TABLE IF NOT EXISTS personal_memories (
+        id INTEGER PRIMARY KEY, holder_id INTEGER NOT NULL, event_id INTEGER NOT NULL,
+        valence INTEGER, interpretation TEXT, day INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS secrets (
+        id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, kind TEXT, severity INTEGER,
+        discovery_chance REAL, known_by TEXT, suspected_by TEXT, evidence INTEGER,
+        created_day INTEGER, exposed_day INTEGER, status TEXT
+      );
+      CREATE TABLE IF NOT EXISTS rumors (
+        id INTEGER PRIMARY KEY, origin_id INTEGER, subject_id INTEGER NOT NULL,
+        text TEXT, truth TEXT, believability INTEGER, spread INTEGER,
+        believers TEXT, skeptics TEXT, uncertain TEXT, created_day INTEGER,
+        status TEXT, secret_id INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS reputation_marks (
+        emp_id INTEGER NOT NULL, tag TEXT NOT NULL, earned_day INTEGER, strength INTEGER,
+        PRIMARY KEY (emp_id, tag)
+      );
+      CREATE TABLE IF NOT EXISTS witnesses (
+        event_id INTEGER NOT NULL, emp_id INTEGER NOT NULL, tier TEXT,
+        PRIMARY KEY (event_id, emp_id)
       );
       CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY, day INTEGER NOT NULL, type TEXT NOT NULL,
@@ -103,7 +145,26 @@ export class ArchiveDb {
       CREATE INDEX IF NOT EXISTS idx_docs_day ON documents(day);
       CREATE INDEX IF NOT EXISTS idx_docs_type ON documents(type);
       CREATE INDEX IF NOT EXISTS idx_docs_event ON documents(event_id) WHERE event_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_reltl_pair ON rel_timeline(a_id, b_id);
+      CREATE INDEX IF NOT EXISTS idx_mem_pair ON memories(a_id, b_id);
+      CREATE INDEX IF NOT EXISTS idx_pmem_event ON personal_memories(event_id);
+      CREATE INDEX IF NOT EXISTS idx_pmem_holder ON personal_memories(holder_id);
+      CREATE INDEX IF NOT EXISTS idx_opinions_subject ON opinions(subject_id);
+      CREATE INDEX IF NOT EXISTS idx_secrets_owner ON secrets(owner_id);
+      CREATE INDEX IF NOT EXISTS idx_rumors_subject ON rumors(subject_id);
+      CREATE INDEX IF NOT EXISTS idx_rep_emp ON reputation_marks(emp_id);
+      CREATE INDEX IF NOT EXISTS idx_witness_event ON witnesses(event_id);
     `);
+    // Additive migration for archives created before this schema. Each is a
+    // no-op (harmless error, swallowed) on a fresh database that already has
+    // the column from the CREATE above.
+    for (const [table, col, decl] of [
+      ["employees", "mood", "TEXT"], ["employees", "mood_day", "INTEGER"],
+      ["relationships", "dims", "TEXT"], ["relationships", "status", "TEXT"],
+      ["relationships", "last_interaction_day", "INTEGER"],
+    ] as const) {
+      try { this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`); } catch { /* column exists */ }
+    }
     try {
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(headline, summary, content='events', content_rowid='id');
@@ -146,6 +207,14 @@ export class ArchiveDb {
       for (const id of out.dirty.clients) { const c = world.clients.get(id); if (c) this.upsertClient(c); }
       for (const id of out.dirty.buildings) { const b = world.buildings.get(id); if (b) this.upsertBuilding(b); }
       for (const key of out.dirty.relationships) { const r = world.relationships.get(key); if (r) this.upsertRelationship(r); }
+      for (const id of out.dirty.memories) { const m = world.memories.get(id); if (m) this.upsertMemory(m); }
+      for (const key of out.dirty.opinions) { const o = world.opinions.get(key); if (o) this.upsertOpinion(o); }
+      for (const id of out.dirty.secrets) { const s = world.secrets.get(id); if (s) this.upsertSecret(s); }
+      for (const id of out.dirty.rumors) { const r = world.rumors.get(id); if (r) this.upsertRumor(r); }
+      for (const key of out.dirty.reputationMarks) { const m = world.reputationMarks.get(key); if (m) this.upsertReputationMark(m); }
+      for (const t of out.relTimeline) this.insertRelTimeline(t);
+      for (const pm of out.personalMemories) this.insertPersonalMemory(pm);
+      for (const wt of out.witnesses) this.upsertWitness(wt);
       this.saveMeta("org", world.org);
       this.saveMeta("snapshot", {
         pressures: world.pressures, scheduled: world.scheduled, nextId: world.nextId,
@@ -166,7 +235,9 @@ export class ArchiveDb {
       org,
       employees: new Map(), departments: new Map(), projects: new Map(),
       technologies: new Map(), products: new Map(), clients: new Map(),
-      buildings: new Map(), relationships: new Map(),
+      buildings: new Map(), relationships: new Map(), memories: new Map(),
+      opinions: new Map(), secrets: new Map(), rumors: new Map(),
+      reputationMarks: new Map(),
       pressures: snap.pressures, scheduled: snap.scheduled, nextId: snap.nextId,
       rngState: snap.rngState, usedCodenames: snap.usedCodenames,
     };
@@ -197,12 +268,27 @@ export class ArchiveDb {
       const rel = rowToRelationship(r);
       world.relationships.set(`${rel.aId}|${rel.bId}`, rel);
     }
+    for (const r of this.db.prepare("SELECT * FROM memories ORDER BY id").all() as Record<string, unknown>[]) {
+      const m = rowToMemory(r); world.memories.set(m.id, m);
+    }
+    for (const r of this.db.prepare("SELECT * FROM opinions ORDER BY day, holder_id, subject_id").all() as Record<string, unknown>[]) {
+      const o = rowToOpinion(r); world.opinions.set(`${o.holderId}|${o.subjectId}`, o);
+    }
+    for (const r of this.db.prepare("SELECT * FROM secrets ORDER BY id").all() as Record<string, unknown>[]) {
+      const s = rowToSecret(r); world.secrets.set(s.id, s);
+    }
+    for (const r of this.db.prepare("SELECT * FROM rumors ORDER BY id").all() as Record<string, unknown>[]) {
+      const rm = rowToRumor(r); world.rumors.set(rm.id, rm);
+    }
+    for (const r of this.db.prepare("SELECT * FROM reputation_marks ORDER BY earned_day, emp_id, tag").all() as Record<string, unknown>[]) {
+      const m = rowToReputationMark(r); world.reputationMarks.set(`${m.empId}|${m.tag}`, m);
+    }
     return world;
   }
 
   /** Destroy all data (used by "reset archive"). */
   wipe(): void {
-    const tables = ["meta", "employees", "departments", "projects", "technologies", "products", "clients", "buildings", "relationships", "events", "event_actors", "event_causes", "documents"];
+    const tables = ["meta", "employees", "departments", "projects", "technologies", "products", "clients", "buildings", "relationships", "rel_timeline", "memories", "opinions", "personal_memories", "secrets", "rumors", "reputation_marks", "witnesses", "events", "event_actors", "event_causes", "documents"];
     this.db.exec("BEGIN");
     for (const t of tables) this.db.exec(`DELETE FROM ${t}`);
     if (this.fts) this.db.exec("DELETE FROM events_fts; DELETE FROM docs_fts;");
@@ -235,9 +321,9 @@ export class ArchiveDb {
 
   private upsertEmployee(e: Employee): void {
     this.db.prepare(
-      `INSERT OR REPLACE INTO employees(id, name, gender, birth_year, personality, traits, role, level, dept_id, salary, skill, stress, happiness, reputation, ambitions, status, hired_day, left_day, achievements, failures)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-    ).run(e.id, e.name, e.gender, e.birthYear, JSON.stringify(e.personality), JSON.stringify(e.traits), e.role, e.level, e.deptId, e.salary, Math.round(e.skill), Math.round(e.stress), Math.round(e.happiness), Math.round(e.reputation), e.ambitionsText, e.status, e.hiredDay, e.leftDay, e.achievements, e.failures);
+      `INSERT OR REPLACE INTO employees(id, name, gender, birth_year, personality, traits, role, level, dept_id, salary, skill, stress, happiness, reputation, ambitions, status, hired_day, left_day, achievements, failures, mood, mood_day)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).run(e.id, e.name, e.gender, e.birthYear, JSON.stringify(e.personality), JSON.stringify(e.traits), e.role, e.level, e.deptId, e.salary, Math.round(e.skill), Math.round(e.stress), Math.round(e.happiness), Math.round(e.reputation), e.ambitionsText, e.status, e.hiredDay, e.leftDay, e.achievements, e.failures, e.mood, e.moodDay);
   }
 
   private upsertDepartment(d: Department): void {
@@ -279,8 +365,56 @@ export class ArchiveDb {
 
   private upsertRelationship(r: Relationship): void {
     this.db.prepare(
-      "INSERT OR REPLACE INTO relationships(a_id, b_id, kind, strength, since_day) VALUES(?,?,?,?,?)"
-    ).run(r.aId, r.bId, r.kind, Math.round(r.strength), r.sinceDay);
+      "INSERT OR REPLACE INTO relationships(a_id, b_id, kind, strength, since_day, dims, status, last_interaction_day) VALUES(?,?,?,?,?,?,?,?)"
+    ).run(r.aId, r.bId, null, null, r.sinceDay, JSON.stringify(roundDims(r.dims)), r.status, r.lastInteractionDay);
+  }
+
+  private upsertMemory(m: Memory): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO memories(id, a_id, b_id, category, day, importance, emotional_impact, event_id, text) VALUES(?,?,?,?,?,?,?,?,?)"
+    ).run(m.id, m.aId, m.bId, m.category, m.day, Math.round(m.importance), Math.round(m.emotionalImpact), m.eventId, m.text);
+  }
+
+  private upsertOpinion(o: Opinion): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO opinions(holder_id, subject_id, sentiment, source, confidence, note, day) VALUES(?,?,?,?,?,?,?)"
+    ).run(o.holderId, o.subjectId, Math.round(o.sentiment), o.source, Math.round(o.confidence), o.note, o.day);
+  }
+
+  private upsertSecret(s: Secret): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO secrets(id, owner_id, kind, severity, discovery_chance, known_by, suspected_by, evidence, created_day, exposed_day, status) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+    ).run(s.id, s.ownerId, s.kind, Math.round(s.severity), s.discoveryChance, JSON.stringify(s.knownBy), JSON.stringify(s.suspectedBy), Math.round(s.evidence), s.createdDay, s.exposedDay, s.status);
+  }
+
+  private upsertRumor(r: Rumor): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO rumors(id, origin_id, subject_id, text, truth, believability, spread, believers, skeptics, uncertain, created_day, status, secret_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    ).run(r.id, r.originId, r.subjectId, r.text, r.truth, Math.round(r.believability), Math.round(r.spread), JSON.stringify(r.believers), JSON.stringify(r.skeptics), JSON.stringify(r.uncertain), r.createdDay, r.status, r.secretId);
+  }
+
+  private upsertReputationMark(m: ReputationMark): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO reputation_marks(emp_id, tag, earned_day, strength) VALUES(?,?,?,?)"
+    ).run(m.empId, m.tag, m.earnedDay, Math.round(m.strength));
+  }
+
+  private upsertWitness(w: Witness): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO witnesses(event_id, emp_id, tier) VALUES(?,?,?)"
+    ).run(w.eventId, w.empId, w.tier);
+  }
+
+  private insertRelTimeline(t: RelTimelineEntry): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO rel_timeline(id, a_id, b_id, day, delta, reason, event_id) VALUES(?,?,?,?,?,?,?)"
+    ).run(t.id, t.aId, t.bId, t.day, Math.round(t.delta), t.reason, t.eventId);
+  }
+
+  private insertPersonalMemory(pm: PersonalMemory): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO personal_memories(id, holder_id, event_id, valence, interpretation, day) VALUES(?,?,?,?,?,?)"
+    ).run(pm.id, pm.holderId, pm.eventId, Math.round(pm.valence), pm.interpretation, pm.day);
   }
 
   /** ---------- queries ---------- */
@@ -395,6 +529,9 @@ export class ArchiveDb {
       documents: n("SELECT COUNT(*) AS n FROM documents"),
       technologies: n("SELECT COUNT(*) AS n FROM technologies"),
       buildings: n("SELECT COUNT(*) AS n FROM buildings"),
+      relationships: n("SELECT COUNT(*) AS n FROM relationships"),
+      secrets: n("SELECT COUNT(*) AS n FROM secrets"),
+      rumors: n("SELECT COUNT(*) AS n FROM rumors"),
     };
   }
 
@@ -523,14 +660,62 @@ export class ArchiveDb {
     return r ? rowToEmployee(r) : null;
   }
 
-  relationshipsFor(empId: number): (Relationship & { otherName: string; otherId: number })[] {
+  relationshipsFor(empId: number): (Relationship & { otherName: string; otherId: number; overall: number })[] {
     const rows = this.db.prepare("SELECT * FROM relationships WHERE a_id = ? OR b_id = ?").all(empId, empId) as Record<string, unknown>[];
     return rows.map((r) => {
       const rel = rowToRelationship(r);
       const otherId = rel.aId === empId ? rel.bId : rel.aId;
       const other = this.getEmployee(otherId);
-      return { ...rel, otherId, otherName: other?.name ?? `#${otherId}` };
-    }).sort((a, b) => Math.abs(b.strength) - Math.abs(a.strength));
+      return { ...rel, otherId, otherName: other?.name ?? `#${otherId}`, overall: relOverall(rel.dims) };
+    }).sort((a, b) => Math.abs(b.overall) - Math.abs(a.overall));
+  }
+
+  /** Everything needed to explore and explain one relationship. */
+  getRelationshipFull(aId: number, bId: number): RelationshipDetail | null {
+    const lo = Math.min(aId, bId), hi = Math.max(aId, bId);
+    if (lo === hi) return null;
+    const a = this.getEmployee(lo), b = this.getEmployee(hi);
+    if (!a || !b) return null;
+    const relRow = this.db.prepare("SELECT * FROM relationships WHERE a_id = ? AND b_id = ?").get(lo, hi) as Record<string, unknown> | undefined;
+    const rel: Relationship = relRow ? rowToRelationship(relRow)
+      : { aId: lo, bId: hi, dims: emptyDims(), status: "acquaintance", sinceDay: 0, lastInteractionDay: 0 };
+    const timeline = (this.db.prepare("SELECT * FROM rel_timeline WHERE a_id = ? AND b_id = ? ORDER BY day ASC, id ASC").all(lo, hi) as Record<string, unknown>[]).map(rowToRelTimeline);
+    const memories = (this.db.prepare("SELECT * FROM memories WHERE a_id = ? AND b_id = ? AND importance > 0 ORDER BY importance DESC, day DESC").all(lo, hi) as Record<string, unknown>[]).map(rowToMemory);
+    const opAB = this.db.prepare("SELECT * FROM opinions WHERE holder_id = ? AND subject_id = ?").get(lo, hi) as Record<string, unknown> | undefined;
+    const opBA = this.db.prepare("SELECT * FROM opinions WHERE holder_id = ? AND subject_id = ?").get(hi, lo) as Record<string, unknown> | undefined;
+    const sharedProjects: { id: number; codename: string }[] = [];
+    for (const p of this.db.prepare("SELECT id, codename, team_ids FROM projects").all() as Record<string, unknown>[]) {
+      const team = JSON.parse((p.team_ids as string) ?? "[]") as number[];
+      if (team.includes(lo) && team.includes(hi)) sharedProjects.push({ id: p.id as number, codename: p.codename as string });
+    }
+    const incidents = (this.db.prepare(
+      "SELECT id, day, headline, type FROM events WHERE id IN (SELECT event_id FROM event_actors WHERE emp_id = ?) AND id IN (SELECT event_id FROM event_actors WHERE emp_id = ?) ORDER BY day ASC LIMIT 40"
+    ).all(lo, hi) as Record<string, unknown>[]).map((r) => ({ id: r.id as number, day: r.day as number, headline: r.headline as string, type: r.type as string }));
+    const friendsOf = (id: number): Set<number> => new Set(
+      this.relationshipsFor(id).filter((r) => r.overall > 15 && ["friend", "close_friend", "mentor"].includes(r.status)).map((r) => r.otherId));
+    const fa = friendsOf(lo), fb = friendsOf(hi);
+    const mutualFriends = [...fa].filter((x) => fb.has(x)).map((id) => ({ id, name: this.getEmployee(id)?.name ?? `#${id}` }));
+    const tagsFor = (id: number): ReputationMark[] => (this.db.prepare("SELECT * FROM reputation_marks WHERE emp_id = ? AND strength > 0 ORDER BY strength DESC").all(id) as Record<string, unknown>[]).map(rowToReputationMark);
+    return {
+      aId: lo, bId: hi, aName: a.name, bName: b.name, aRole: a.role, bRole: b.role,
+      aMood: a.mood, bMood: b.mood, dims: rel.dims, status: rel.status,
+      overall: relOverall(rel.dims), compatibility: personalityCompatibility(a.personality, b.personality),
+      sinceDay: rel.sinceDay, lastInteractionDay: rel.lastInteractionDay,
+      timeline, memories,
+      opinionAtoB: opAB ? rowToOpinion(opAB) : null,
+      opinionBtoA: opBA ? rowToOpinion(opBA) : null,
+      sharedProjects, incidents, mutualFriends,
+      aTags: tagsFor(lo), bTags: tagsFor(hi),
+    };
+  }
+
+  /** Secrets known to touch an employee (as owner). */
+  secretsFor(empId: number): Secret[] {
+    return (this.db.prepare("SELECT * FROM secrets WHERE owner_id = ? ORDER BY id").all(empId) as Record<string, unknown>[]).map(rowToSecret);
+  }
+
+  reputationFor(empId: number): ReputationMark[] {
+    return (this.db.prepare("SELECT * FROM reputation_marks WHERE emp_id = ? AND strength > 0 ORDER BY strength DESC").all(empId) as Record<string, unknown>[]).map(rowToReputationMark);
   }
 
   listProjects(opts: { text?: string; status?: string; offset?: number; limit?: number }): { total: number; rows: Project[] } {
@@ -603,10 +788,14 @@ function rowToEvent(r: Record<string, unknown>): SimEvent {
 }
 
 function rowToEmployee(r: Record<string, unknown>): Employee {
+  const p = JSON.parse(r.personality as string) as Employee["personality"];
+  // Back-compat: personality dimensions added after some archives were created.
+  if (typeof p.integrity !== "number") p.integrity = 55;
+  if (typeof p.narcissism !== "number") p.narcissism = 30;
   return {
     id: r.id as number, name: r.name as string, gender: r.gender as Employee["gender"],
     birthYear: r.birth_year as number,
-    personality: JSON.parse(r.personality as string),
+    personality: p,
     traits: JSON.parse(r.traits as string),
     role: r.role as string, level: r.level as number, deptId: r.dept_id as number | null,
     salary: r.salary as number, skill: r.skill as number, stress: r.stress as number,
@@ -614,6 +803,8 @@ function rowToEmployee(r: Record<string, unknown>): Employee {
     ambitionsText: r.ambitions as string, status: r.status as Employee["status"],
     hiredDay: r.hired_day as number, leftDay: r.left_day as number | null,
     achievements: r.achievements as number, failures: r.failures as number,
+    mood: (r.mood as Employee["mood"]) ?? "content",
+    moodDay: (r.mood_day as number | null) ?? 0,
   };
 }
 
@@ -673,9 +864,90 @@ function rowToBuilding(r: Record<string, unknown>): Building {
   };
 }
 
+function roundDims(dims: Record<RelDimension, number>): Record<RelDimension, number> {
+  const out = {} as Record<RelDimension, number>;
+  for (const k of REL_DIMENSIONS) out[k] = Math.round(dims[k] ?? 0);
+  return out;
+}
+
+/** Map a legacy (kind, strength) relationship onto the new dimension vector. */
+function legacyDims(kind: string | null, strength: number): Record<RelDimension, number> {
+  const d = emptyDims();
+  switch (kind) {
+    case "friend": d.friendship = strength; d.trust = Math.round(strength * 0.6); break;
+    case "rival": d.competition = -strength; d.trust = Math.round(strength * 0.5); break;
+    case "mentor": d.mentorship = Math.abs(strength); d.respect = Math.round(Math.abs(strength) * 0.6); break;
+    case "romance": d.attraction = strength; d.friendship = Math.round(strength * 0.5); break;
+    default: d.trust = strength;
+  }
+  return d;
+}
+
 function rowToRelationship(r: Record<string, unknown>): Relationship {
+  const dims = r.dims
+    ? { ...emptyDims(), ...(JSON.parse(r.dims as string) as Record<RelDimension, number>) }
+    : legacyDims(r.kind as string | null, (r.strength as number | null) ?? 0);
   return {
-    aId: r.a_id as number, bId: r.b_id as number, kind: r.kind as Relationship["kind"],
-    strength: r.strength as number, sinceDay: r.since_day as number,
+    aId: r.a_id as number, bId: r.b_id as number,
+    dims,
+    status: (r.status as Relationship["status"]) ?? "acquaintance",
+    sinceDay: r.since_day as number,
+    lastInteractionDay: (r.last_interaction_day as number | null) ?? (r.since_day as number),
+  };
+}
+
+function rowToRelTimeline(r: Record<string, unknown>): RelTimelineEntry {
+  return {
+    id: r.id as number, aId: r.a_id as number, bId: r.b_id as number,
+    day: r.day as number, delta: r.delta as number, reason: r.reason as string,
+    eventId: r.event_id as number | null,
+  };
+}
+
+function rowToMemory(r: Record<string, unknown>): Memory {
+  return {
+    id: r.id as number, aId: r.a_id as number, bId: r.b_id as number,
+    category: r.category as Memory["category"], day: r.day as number,
+    importance: r.importance as number, emotionalImpact: r.emotional_impact as number,
+    eventId: r.event_id as number | null, text: r.text as string,
+  };
+}
+
+function rowToOpinion(r: Record<string, unknown>): Opinion {
+  return {
+    holderId: r.holder_id as number, subjectId: r.subject_id as number,
+    sentiment: r.sentiment as number, source: r.source as Opinion["source"],
+    confidence: r.confidence as number, note: r.note as string, day: r.day as number,
+  };
+}
+
+function rowToSecret(r: Record<string, unknown>): Secret {
+  return {
+    id: r.id as number, ownerId: r.owner_id as number, kind: r.kind as Secret["kind"],
+    severity: r.severity as number, discoveryChance: r.discovery_chance as number,
+    knownBy: JSON.parse((r.known_by as string) ?? "[]"),
+    suspectedBy: JSON.parse((r.suspected_by as string) ?? "[]"),
+    evidence: r.evidence as number, createdDay: r.created_day as number,
+    exposedDay: r.exposed_day as number | null, status: r.status as Secret["status"],
+  };
+}
+
+function rowToRumor(r: Record<string, unknown>): Rumor {
+  return {
+    id: r.id as number, originId: r.origin_id as number | null, subjectId: r.subject_id as number,
+    text: r.text as string, truth: r.truth as Rumor["truth"],
+    believability: r.believability as number, spread: r.spread as number,
+    believers: JSON.parse((r.believers as string) ?? "[]"),
+    skeptics: JSON.parse((r.skeptics as string) ?? "[]"),
+    uncertain: JSON.parse((r.uncertain as string) ?? "[]"),
+    createdDay: r.created_day as number, status: r.status as Rumor["status"],
+    secretId: r.secret_id as number | null,
+  };
+}
+
+function rowToReputationMark(r: Record<string, unknown>): ReputationMark {
+  return {
+    empId: r.emp_id as number, tag: r.tag as ReputationMark["tag"],
+    earnedDay: r.earned_day as number, strength: r.strength as number,
   };
 }

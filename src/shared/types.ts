@@ -35,7 +35,14 @@ export interface Personality {
   ambition: number;    // 0-100 drive for advancement
   empathy: number;     // 0-100 warmth toward others
   volatility: number;  // 0-100 emotional instability
+  integrity: number;   // 0-100 honesty / ethics
+  narcissism: number;  // 0-100 self-regard / manipulativeness
 }
+
+/** Current dominant emotional colour of a person, set by high-impact memories. */
+export type Mood =
+  | "content" | "proud" | "ashamed" | "heartbroken" | "angry"
+  | "inspired" | "traumatized" | "jealous" | "motivated";
 
 export interface Employee {
   id: number;
@@ -58,6 +65,8 @@ export interface Employee {
   leftDay: number | null;
   achievements: number;
   failures: number;
+  mood: Mood;
+  moodDay: number;      // day the current mood was set (fades over time)
 }
 
 export type DeptFunction =
@@ -140,14 +149,206 @@ export interface Building {
   capacity: number;
 }
 
+/** Legacy scalar relationship kind — retained for back-compat migration only. */
 export type RelKind = "friend" | "rival" | "mentor" | "romance";
 
+/**
+ * The multi-component breakdown of a relationship. Each dimension is a signed
+ * -100..100 float. The overall score and display status are derived from these.
+ */
+export type RelDimension =
+  | "trust"        // professional trust
+  | "friendship"
+  | "respect"
+  | "admiration"
+  | "fear"
+  | "jealousy"
+  | "competition"  // professional rivalry
+  | "alignment"    // political alignment
+  | "loyalty"
+  | "attraction"   // romantic attraction
+  | "mentorship";
+
+export const REL_DIMENSIONS: RelDimension[] = [
+  "trust", "friendship", "respect", "admiration", "fear",
+  "jealousy", "competition", "alignment", "loyalty", "attraction", "mentorship",
+];
+
+export type RelStatus =
+  | "acquaintance" | "friend" | "close_friend" | "rival" | "enemy"
+  | "romance" | "ex_romance" | "mentor" | "estranged";
+
+export function emptyDims(): Record<RelDimension, number> {
+  const d = {} as Record<RelDimension, number>;
+  for (const k of REL_DIMENSIONS) d[k] = 0;
+  return d;
+}
+
+/** Signed composite score of a relationship, roughly -100..100. */
+export function relOverall(dims: Record<RelDimension, number>): number {
+  const positive = dims.trust + dims.friendship + dims.respect + dims.admiration
+    + dims.alignment + dims.loyalty + dims.attraction + dims.mentorship;
+  const negative = dims.fear + dims.jealousy + dims.competition;
+  const raw = positive * 0.16 - negative * 0.28;
+  return Math.max(-100, Math.min(100, Math.round(raw)));
+}
+
+/**
+ * Symmetric personality compatibility, -100..100. Similar openness and shared
+ * ethics bond; two ambitious egos clash; narcissism corrodes; warmth helps.
+ * Pure and shared so the engine, persistence and UI all agree.
+ */
+export function personalityCompatibility(a: Personality, b: Personality): number {
+  const opennessAffinity = 100 - Math.abs(a.openness - b.openness);
+  const warmth = (a.empathy + b.empathy) / 2;
+  const sharedEthics = 100 - Math.abs(a.integrity - b.integrity);
+  const egoClash = (a.ambition * b.ambition) / 100 * (a.narcissism > 60 && b.narcissism > 60 ? 1 : 0.5);
+  const narcissism = (a.narcissism + b.narcissism) / 2;
+  const raw = opennessAffinity * 0.22 + warmth * 0.32 + sharedEthics * 0.22
+    - egoClash * 0.2 - narcissism * 0.12 - 12;
+  return Math.max(-100, Math.min(100, Math.round(raw)));
+}
+
+/** Derive the display status label from the dimension vector. */
+export function relStatusFromDims(dims: Record<RelDimension, number>): RelStatus {
+  const overall = relOverall(dims);
+  if (dims.attraction >= 45) return "romance";
+  if (dims.attraction <= -25 && dims.friendship < 20) return "ex_romance";
+  if (dims.mentorship >= 45 && dims.mentorship >= dims.friendship) return "mentor";
+  if (dims.competition >= 55 && dims.trust <= 0) return overall <= -35 ? "enemy" : "rival";
+  if (overall <= -45) return "enemy";
+  if (overall <= -18) return "rival";
+  if (dims.friendship >= 60 || overall >= 55) return "close_friend";
+  if (dims.friendship >= 25 || overall >= 22) return "friend";
+  return "acquaintance";
+}
+
+/** The shared, symmetric bond between two people (aId < bId). */
 export interface Relationship {
   aId: number;
   bId: number;
-  kind: RelKind;
-  strength: number; // -100..100
+  dims: Record<RelDimension, number>;
+  status: RelStatus;          // derived from dims, stored for querying
   sinceDay: number;
+  lastInteractionDay: number;
+}
+
+/** One dated, causal change to a relationship — the relationship timeline. */
+export interface RelTimelineEntry {
+  id: number;
+  aId: number;
+  bId: number;
+  day: number;
+  delta: number;              // net change to the overall score
+  reason: string;
+  eventId: number | null;
+}
+
+export type MemoryCategory =
+  | "shared_lunch" | "completed_project" | "saved_career" | "promotion"
+  | "humiliation" | "betrayal" | "romance_started" | "romantic_breakup"
+  | "conflict" | "defense" | "mentorship" | "reconciliation" | "award";
+
+/** A significant interaction remembered by a relationship (aId < bId). */
+export interface Memory {
+  id: number;
+  aId: number;
+  bId: number;
+  category: MemoryCategory;
+  day: number;
+  importance: number;         // 1..100, decays unless "major" (>=40)
+  emotionalImpact: number;    // -100..100
+  eventId: number | null;
+  text: string;
+}
+
+/** A memory of importance >= this threshold resists decay for decades. */
+export const MAJOR_MEMORY = 40;
+
+export type OpinionSource =
+  | "direct" | "rumor" | "dept_culture" | "witnessed" | "recommendation"
+  | "media" | "investigation" | "reputation";
+
+/** Directional: how holderId views subjectId. */
+export interface Opinion {
+  holderId: number;
+  subjectId: number;
+  sentiment: number;          // -100..100
+  source: OpinionSource;
+  confidence: number;         // 0..100
+  note: string;
+  day: number;
+}
+
+/** One person's subjective recollection of an objective event. */
+export interface PersonalMemory {
+  id: number;
+  holderId: number;
+  eventId: number;
+  valence: number;            // -100..100 how they felt about it
+  interpretation: string;
+  day: number;
+}
+
+export type SecretKind =
+  | "gambling" | "alcohol" | "debt" | "affair" | "fake_diploma"
+  | "expense_fraud" | "code_plagiarism" | "data_theft" | "espionage"
+  | "bribery" | "blackmail" | "secret_project" | "side_business";
+
+export type SecretStatus = "hidden" | "suspected" | "exposed";
+
+export interface Secret {
+  id: number;
+  ownerId: number;
+  kind: SecretKind;
+  severity: number;           // 1..100
+  discoveryChance: number;    // 0..1 per check
+  knownBy: number[];
+  suspectedBy: number[];
+  evidence: number;           // 0..100
+  createdDay: number;
+  exposedDay: number | null;
+  status: SecretStatus;
+}
+
+export type RumorTruth = "true" | "false" | "distorted";
+export type RumorStatus = "spreading" | "faded" | "confirmed" | "debunked";
+
+export interface Rumor {
+  id: number;
+  originId: number | null;
+  subjectId: number;
+  text: string;
+  truth: RumorTruth;
+  believability: number;      // 0..100
+  spread: number;             // 0..100 share of org reached
+  believers: number[];
+  skeptics: number[];
+  uncertain: number[];
+  createdDay: number;
+  status: RumorStatus;
+  secretId: number | null;
+}
+
+export type ScandalTier = "minor" | "moderate" | "major" | "critical";
+
+export type WitnessTier = "direct" | "indirect" | "heard" | "none";
+
+export interface Witness {
+  eventId: number;
+  empId: number;
+  tier: WitnessTier;
+}
+
+export type ReputationTag =
+  | "reliable" | "brilliant" | "lazy" | "aggressive" | "dishonest"
+  | "charismatic" | "visionary" | "manipulator" | "corrupt";
+
+export interface ReputationMark {
+  empId: number;
+  tag: ReputationTag;
+  earnedDay: number;
+  strength: number;           // 0..100
 }
 
 /** Every historical fact is an Event. Events link to their causes, forming a DAG. */
@@ -171,7 +372,8 @@ export type DocType =
   | "email" | "memo" | "meeting_minutes" | "incident_report" | "press_release"
   | "promotion_letter" | "termination_letter" | "offer_letter" | "resignation_letter"
   | "project_proposal" | "financial_report" | "research_paper" | "security_log"
-  | "performance_review" | "legal_filing" | "board_minutes";
+  | "performance_review" | "legal_filing" | "board_minutes"
+  | "hr_report" | "investigation_report" | "witness_statement" | "arrest_record";
 
 export interface SimDocument {
   id: number;
@@ -195,6 +397,8 @@ export interface OrgState {
   ceoId: number | null;
   seed: number;
   bankruptcies: number;
+  /** Number of critical scandals in this org's history — capped, extremely rare. */
+  criticalScandals: number;
 }
 
 /** Aggregate dashboard stats computed from the DB. */
@@ -210,6 +414,9 @@ export interface ArchiveStats {
   documents: number;
   technologies: number;
   buildings: number;
+  relationships: number;
+  secrets: number;
+  rumors: number;
 }
 
 export const SPEEDS = [0, 1, 2, 5, 10, 50, 100] as const;
@@ -246,6 +453,35 @@ export interface SearchResult {
   subtitle: string;
   day: number | null;
   snippet?: string;
+}
+
+/** Everything needed to explore and explain a single relationship. */
+export interface RelationshipDetail {
+  aId: number; bId: number;
+  aName: string; bName: string;
+  aRole: string; bRole: string;
+  aMood: Mood; bMood: Mood;
+  dims: Record<RelDimension, number>;
+  status: RelStatus;
+  overall: number;
+  compatibility: number;
+  sinceDay: number;
+  lastInteractionDay: number;
+  timeline: RelTimelineEntry[];
+  memories: Memory[];
+  opinionAtoB: Opinion | null;
+  opinionBtoA: Opinion | null;
+  sharedProjects: { id: number; codename: string }[];
+  incidents: { id: number; day: number; headline: string; type: string }[];
+  mutualFriends: { id: number; name: string }[];
+  aTags: ReputationMark[];
+  bTags: ReputationMark[];
+}
+
+export interface RelationshipExplanation {
+  text: string;
+  citations: InvestigatorCitation[];
+  usedLlm: boolean;
 }
 
 export interface InvestigatorCitation {

@@ -296,6 +296,87 @@ export function composeDocs(ctx: DocCtx, ev: SimEvent): DocDraft[] {
       }
       break;
     }
+    case "secret_exposed": {
+      const hr = ctx.pickByFn("hr");
+      out.push({
+        type: "hr_report", title: `Confidential findings — ${a0?.name ?? "employee"}`, authorId: hr?.id ?? null,
+        body: `CONFIDENTIAL — HR FINDINGS\nDate: ${ctx.dateLabel(ctx.day)}\nSubject: ${a0?.name ?? "[redacted]"}\nMatter: ${String(ev.data.kind ?? "undisclosed conduct")}\nAssessed severity: ${String(ev.data.severity ?? "—")}/100\n\nSUMMARY\n${ev.summary}\n\nRECOMMENDATION\n${Number(ev.data.severity ?? 0) > 60 ? "Escalate to a formal investigation. Preserve all records; restrict system access pending review." : "Handle through standard personnel process with a documented warning."}\n\n${hr?.name ?? "Office of Personnel"}`,
+      });
+      break;
+    }
+    case "scandal": {
+      const tier = String(ev.data.tier ?? "moderate");
+      const claim = String(ev.data.claim ?? "misconduct");
+      if (tier === "major" || tier === "critical") {
+        out.push(pressRelease(ctx, `${org.name} responds to allegations`, `${org.name} is aware of reports concerning ${claim}. ${rng.pick([
+          "We take these matters with the utmost seriousness and have opened a full investigation.",
+          "We will not comment on personnel matters under active review, but we are cooperating fully.",
+          "The conduct alleged, if substantiated, is contrary to everything this organization stands for.",
+        ])}`));
+      }
+      out.push({
+        type: "memo", title: `Leadership notice — active investigation`, authorId: ctx.pickByFn("legal")?.id ?? null,
+        body: `INTERNAL — LEADERSHIP DISTRIBUTION\nDate: ${ctx.dateLabel(ctx.day)}\nRe: allegations of ${claim}\n\nA matter concerning ${a0?.name ?? "a member of staff"} is under investigation. All staff are directed to preserve relevant records and to route inquiries to ${ctx.pickByFn("legal")?.name ?? "counsel"}. Speculation is unhelpful and, in some cases, actionable.`,
+      });
+      break;
+    }
+    case "scandal_investigation": {
+      const claim = String(ev.data.claim ?? "the allegations");
+      const investigator = ev.actorIds.length > 1 ? ctx.emp(ev.actorIds[1]) : ctx.pickByFn("legal");
+      out.push({
+        type: "investigation_report", title: `Investigation opened — ${claim}`, authorId: investigator?.id ?? null,
+        body: `INVESTIGATION FILE — CONFIDENTIAL\nDate opened: ${ctx.dateLabel(ctx.day)}\nLead: ${investigator?.name ?? "assigned counsel"}\nScope: ${claim}\n\nMETHOD\nDocument preservation notice issued. Witness interviews to follow. System access logs pulled.\n\nSTATUS\nActive. Findings to be reported to leadership on conclusion.`,
+      });
+      // A couple of witness statements give the file texture.
+      const dept = ev.deptId !== null ? ctx.dept(ev.deptId) : undefined;
+      for (let i = 0; i < 2; i++) {
+        out.push({
+          type: "witness_statement", title: `Witness statement (${i + 1})`, authorId: null,
+          body: `WITNESS STATEMENT — CONFIDENTIAL\nDate: ${ctx.dateLabel(ctx.day)}\nMatter: ${claim}\n\n"${rng.pick([
+            "I only know what I saw, and I saw less than people think.",
+            "There were signs. In hindsight, obvious ones.",
+            "I don't want to be involved, but I won't lie under questioning.",
+            "Everyone knew something was off. Nobody said it out loud.",
+          ])}"\n\nStatement recorded and countersigned.`,
+        });
+      }
+      break;
+    }
+    case "scandal_resolved": {
+      out.push(meetingMinutes(ctx, `Board session — ${String(ev.data.claim ?? "investigation")} findings`, ev.actorIds, [
+        `Investigation into ${String(ev.data.claim ?? "the matter")} substantiated.`,
+        rng.pick(["Termination approved.", "Referral to authorities under discussion.", "Separation agreed on leadership's terms."]),
+        rng.pick(["Communications to prepare a statement.", "Legal to assess exposure.", "Board requests a governance review."]),
+      ]));
+      break;
+    }
+    case "cover_up": {
+      out.push({
+        type: "memo", title: `File closed — no further action`, authorId: ctx.pickByFn("legal")?.id ?? null,
+        body: `INTERNAL\nDate: ${ctx.dateLabel(ctx.day)}\nRe: ${String(ev.data.claim ?? "the matter")}\n\nThe review is concluded. No findings will be published and no further action will be taken. This memo is the complete record. Distribution is restricted.`,
+      });
+      break;
+    }
+    case "arrest": {
+      out.push({
+        type: "arrest_record", title: `Arrest — ${a0?.name ?? "individual"}`, authorId: null,
+        body: `LAW ENFORCEMENT RECORD (COPY ON FILE)\nDate: ${ctx.dateLabel(ctx.day)}\nName: ${a0?.name ?? "[redacted]"}\nIn connection with: ${String(ev.data.claim ?? "an ongoing matter")}\n\nThe individual was taken into custody. ${org.name} states it is cooperating with authorities and has suspended the individual pending proceedings.`,
+      });
+      out.push(pressRelease(ctx, `Statement on the arrest of ${a0?.name ?? "a former employee"}`, `${org.name} confirms that ${a0?.name ?? "the individual"} is no longer affiliated with the organization. We are cooperating fully with authorities and will not comment further.`));
+      break;
+    }
+    case "rumor_spread": {
+      if (a0 && rng.chance(0.6)) {
+        out.push(emailDoc(ctx, undefined, `[a colleague] <someone@${domain(org)}>`, `did you hear…`,
+          `Keeping this off the record, but — ${ev.summary}\n\n${rng.pick([
+            "You didn't hear it from me.",
+            "No idea if it's true. Probably is.",
+            "Delete this after you read it.",
+            "Anyway. Back to work.",
+          ])}`));
+      }
+      break;
+    }
     default: {
       // Routine events occasionally leave a stray email in the archive.
       if (rng.chance(0.15) && a0) {

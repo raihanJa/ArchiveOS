@@ -19,6 +19,8 @@ const api = {
 
   listProjects: (opts: unknown) => ipcRenderer.invoke("projects:list", opts),
   getProject: (id: number) => ipcRenderer.invoke("projects:get", id),
+  getRelationship: (aId: number, bId: number) => ipcRenderer.invoke("relationship:get", { aId, bId }),
+  explainRelationship: (aId: number, bId: number) => ipcRenderer.invoke("relationship:explain", { aId, bId }),
 
   listDepartments: () => ipcRenderer.invoke("departments:list"),
   getDepartment: (id: number) => ipcRenderer.invoke("departments:get", id),

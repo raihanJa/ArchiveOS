@@ -1,6 +1,6 @@
 import type {
-  Building, Client, Department, Employee, OrgState, Product, Project,
-  Relationship, Technology,
+  Building, Client, Department, Employee, Memory, OrgState, Opinion, Product,
+  Project, Relationship, ReputationMark, Rumor, Secret, Technology,
 } from "../shared/types";
 
 /**
@@ -19,6 +19,16 @@ export interface WorldState {
   buildings: Map<number, Building>;
   /** key = `${min}|${max}` of the two employee ids */
   relationships: Map<string, Relationship>;
+  /** key = memory id */
+  memories: Map<number, Memory>;
+  /** key = `${holderId}|${subjectId}` — directional views */
+  opinions: Map<string, Opinion>;
+  /** key = secret id */
+  secrets: Map<number, Secret>;
+  /** key = rumor id */
+  rumors: Map<number, Rumor>;
+  /** key = `${empId}|${tag}` — earned reputation tags */
+  reputationMarks: Map<string, ReputationMark>;
   /** Named pressures that decay daily and bias event probabilities. */
   pressures: Record<string, number>;
   /** Delayed consequences: the causal engine's queue. */
@@ -38,6 +48,14 @@ export interface ScheduledItem {
 
 export function relKey(a: number, b: number): string {
   return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+export function opinionKey(holderId: number, subjectId: number): string {
+  return `${holderId}|${subjectId}`;
+}
+
+export function repKey(empId: number, tag: string): string {
+  return `${empId}|${tag}`;
 }
 
 /** Serializable snapshot of non-tabular engine state. */

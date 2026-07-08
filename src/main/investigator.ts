@@ -4,6 +4,7 @@ import type {
   Project, SimEvent,
 } from "../shared/types";
 import { formatSimDate } from "../shared/types";
+import { RelationshipExplainer } from "./explain";
 
 /**
  * The AI Investigator answers natural-language questions about the archive.
@@ -18,6 +19,13 @@ export class Investigator {
   constructor(private db: ArchiveDb, private org: () => OrgState) {}
 
   async ask(question: string, settings: AppSettings): Promise<InvestigatorAnswer> {
+    // "Why do X and Y hate each other" style questions route to the dedicated
+    // relationship explainer, which walks the pair's own timeline and memories.
+    const pair = this.detectRelationshipQuery(question);
+    if (pair) {
+      const exp = await new RelationshipExplainer(this.db, this.org).explain(pair.aId, pair.bId, settings);
+      return { answer: exp.text, citations: exp.citations, usedLlm: exp.usedLlm };
+    }
     const retrieval = this.retrieve(question);
     if (settings.investigatorUsesLlm && settings.anthropicApiKey) {
       try {
@@ -29,6 +37,15 @@ export class Investigator {
       }
     }
     return this.composeLocal(question, retrieval);
+  }
+
+  /** Detect a two-person relationship question and resolve the pair. */
+  private detectRelationshipQuery(question: string): { aId: number; bId: number } | null {
+    const q = question.toLowerCase();
+    if (!/relationship|hate|feud|rival|trust|loyal|love|romance|romantic|dating|friends|get along|between|why do|why are|how do .* feel/.test(q)) return null;
+    const r = this.retrieve(question);
+    if (r.employees.length >= 2) return { aId: r.employees[0].id, bId: r.employees[1].id };
+    return null;
   }
 
   /** ---------- retrieval ---------- */
